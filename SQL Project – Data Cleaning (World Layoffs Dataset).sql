@@ -1,150 +1,131 @@
 -- ==========================================================
--- SQL DATA CLEANING PROJECT: COMPANY LAYOFFS DATASET
+-- 🧹 SQL PROJECT: DATA CLEANING - WORLD LAYOFFS DATASET
 -- ==========================================================
--- Goal:
---   1. Remove duplicates
---   2. Standardize the data (companies, industries, countries, dates)
---   3. Handle null or blank values
---   4. Remove irrelevant columns
---   5. Prepare data for analysis
+-- 📊 Source: https://www.kaggle.com/datasets/swaptr/layoffs-2022
+-- Objective:
+--   Clean and prepare global layoffs data for analysis by:
+--   1. Removing duplicates
+--   2. Standardizing data and fixing inconsistencies
+--   3. Handling null values
+--   4. Removing irrelevant data
 -- ==========================================================
 
+-- Step 1: Load and Inspect Raw Data
+SELECT * 
+FROM world_layoffs.layoffs;
 
--- =========================================
--- STEP 1: Create a staging table (safe copy)
--- =========================================
-CREATE TABLE layoffs_staging LIKE layoffs;
+-- Create a staging table to preserve the raw data
+CREATE TABLE world_layoffs.layoffs_staging LIKE world_layoffs.layoffs;
 
-INSERT INTO layoffs_staging
+INSERT INTO world_layoffs.layoffs_staging
+SELECT * FROM world_layoffs.layoffs;
+
+
+-- ==========================================================
+-- 1️⃣ REMOVE DUPLICATES
+-- ==========================================================
+
+-- Identify duplicate records
 SELECT *
-FROM layoffs;
-
-SELECT COUNT(*) AS raw_row_count
-FROM layoffs_staging;
-
-
-
--- =========================================
--- STEP 2: Identify and remove duplicates
--- =========================================
--- Use ROW_NUMBER() to mark duplicate rows
-WITH duplicate_cte AS (
-    SELECT *,
+FROM (
+    SELECT company, location, industry, total_laid_off, percentage_laid_off, `date`, stage, country, funds_raised_millions,
            ROW_NUMBER() OVER (
-               PARTITION BY company, location, industry, total_laid_off, percentage_laid_off, `date`,
-                            stage, country, funds_raised_millions
+               PARTITION BY company, location, industry, total_laid_off, percentage_laid_off, `date`, stage, country, funds_raised_millions
            ) AS row_num
-    FROM layoffs_staging
-)
-SELECT *
-FROM duplicate_cte
-WHERE row_num > 1;  -- check duplicates
-
-
--- Create a second staging table to safely delete duplicates
-CREATE TABLE layoffs_staging2 (
-  company TEXT,
-  location TEXT,
-  industry TEXT,
-  total_laid_off INT DEFAULT NULL,
-  percentage_laid_off TEXT,
-  `date` TEXT,
-  stage TEXT,
-  country TEXT,
-  funds_raised_millions INT DEFAULT NULL,
-  row_num INT
-);
-
--- Insert data with row_num assigned
-INSERT INTO layoffs_staging2
-SELECT *,
-       ROW_NUMBER() OVER(
-           PARTITION BY company, location, industry, total_laid_off, percentage_laid_off, `date`,
-                        stage, country, funds_raised_millions
-       ) AS row_num
-FROM layoffs_staging;
-
--- Remove duplicate rows (keep only row_num = 1)
-DELETE
-FROM layoffs_staging2
+    FROM world_layoffs.layoffs_staging
+) duplicates
 WHERE row_num > 1;
 
-SELECT COUNT(*) AS after_dedup_row_count
-FROM layoffs_staging2;
+-- Create a new staging table with row numbers for easier deletion
+CREATE TABLE world_layoffs.layoffs_staging2 (
+    company TEXT,
+    location TEXT,
+    industry TEXT,
+    total_laid_off INT,
+    percentage_laid_off TEXT,
+    `date` TEXT,
+    stage TEXT,
+    country TEXT,
+    funds_raised_millions INT,
+    row_num INT
+);
+
+INSERT INTO world_layoffs.layoffs_staging2
+SELECT company, location, industry, total_laid_off, percentage_laid_off, `date`, stage, country, funds_raised_millions,
+       ROW_NUMBER() OVER (
+           PARTITION BY company, location, industry, total_laid_off, percentage_laid_off, `date`, stage, country, funds_raised_millions
+       ) AS row_num
+FROM world_layoffs.layoffs_staging;
+
+-- Remove duplicates
+DELETE FROM world_layoffs.layoffs_staging2
+WHERE row_num > 1;
 
 
+-- ==========================================================
+-- 2️⃣ STANDARDIZE DATA
+-- ==========================================================
 
--- =========================================
--- STEP 3: Standardize text fields
--- =========================================
--- Trim extra spaces from company names
-UPDATE layoffs_staging2
-SET company = TRIM(company);
+-- Check for inconsistencies and nulls in 'industry'
+SELECT DISTINCT industry
+FROM world_layoffs.layoffs_staging2
+ORDER BY industry;
 
--- Standardize industry values (e.g., "Crypto" vs "Cryptocurrency")
-UPDATE layoffs_staging2
+-- Replace blank strings with NULLs
+UPDATE world_layoffs.layoffs_staging2
+SET industry = NULL
+WHERE industry = '';
+
+-- Populate missing industries using values from duplicate company names
+UPDATE t1
+JOIN world_layoffs.layoffs_staging2 t2
+ON t1.company = t2.company
+SET t1.industry = t2.industry
+WHERE t1.industry IS NULL
+AND t2.industry IS NOT NULL;
+
+-- Standardize variations (e.g., “Crypto Currency”, “CryptoCurrency” → “Crypto”)
+UPDATE world_layoffs.layoffs_staging2
 SET industry = 'Crypto'
-WHERE industry LIKE 'Crypto%';
+WHERE industry IN ('Crypto Currency', 'CryptoCurrency');
 
--- Fix inconsistent country values (e.g., "United States." -> "United States")
-UPDATE layoffs_staging2
-SET country = TRIM(TRAILING '.' FROM country)
-WHERE country LIKE 'United States%';
+-- Standardize country names (remove trailing periods)
+UPDATE world_layoffs.layoffs_staging2
+SET country = TRIM(TRAILING '.' FROM country);
 
-
-
--- =========================================
--- STEP 4: Standardize dates
--- =========================================
--- Convert from text to DATE format
-UPDATE layoffs_staging2
+-- Convert date column to proper DATE format
+UPDATE world_layoffs.layoffs_staging2
 SET `date` = STR_TO_DATE(`date`, '%m/%d/%Y');
 
-ALTER TABLE layoffs_staging2
+ALTER TABLE world_layoffs.layoffs_staging2
 MODIFY COLUMN `date` DATE;
 
 
-
--- =========================================
--- STEP 5: Handle null or blank values
--- =========================================
--- Find null or blank industries
-SELECT *
-FROM layoffs_staging2
-WHERE industry IS NULL OR industry = '';
-
--- Example: Airbnb had missing industry -> set to "Travel"
-UPDATE layoffs_staging2
-SET industry = 'Travel'
-WHERE company = 'Airbnb'
-  AND (industry IS NULL OR industry = '');
-
--- Fill null industries using other rows of the same company
-UPDATE layoffs_staging2 t1
-JOIN layoffs_staging2 t2
-    ON t1.company = t2.company
-SET t1.industry = t2.industry
-WHERE (t1.industry IS NULL OR t1.industry = '')
-  AND t2.industry IS NOT NULL;
+-- ==========================================================
+-- 3️⃣ HANDLE NULL VALUES
+-- ==========================================================
+-- Keep NULLs in numeric fields for accurate analysis
+-- (e.g., total_laid_off, percentage_laid_off, funds_raised_millions)
+-- No further changes necessary here.
 
 
+-- ==========================================================
+-- 4️⃣ REMOVE IRRELEVANT DATA
+-- ==========================================================
 
--- =========================================
--- STEP 6: Remove irrelevant columns
--- =========================================
-ALTER TABLE layoffs_staging2
+-- Delete rows with missing key values (both total and percentage laid off are NULL)
+DELETE FROM world_layoffs.layoffs_staging2
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+-- Drop helper column
+ALTER TABLE world_layoffs.layoffs_staging2
 DROP COLUMN row_num;
 
 
+-- ==========================================================
+-- ✅ FINAL CLEANED DATA
+-- ==========================================================
+SELECT * 
+FROM world_layoffs.layoffs_staging2;
 
--- =========================================
--- FINAL CHECK
--- =========================================
--- View cleaned dataset
-SELECT *
-FROM layoffs_staging2
-LIMIT 20;
-
--- Row count after full cleaning
-SELECT COUNT(*) AS final_row_count
-FROM layoffs_staging2;
